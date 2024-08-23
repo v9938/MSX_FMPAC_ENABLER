@@ -1,0 +1,203 @@
+	.z80
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;	
+;	MSX FMPAC Enabler
+;	Copyright @v9938
+;	24/08/23 Ver 1.0 	初版
+;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;       BIOS entry
+;
+
+rdslt		equ 000ch
+wrslt		equ 0014h
+msxver		equ	002dh
+calslt		equ 001ch
+snsmat		equ	0141h
+calbas		equ	0159h
+chgcpu		equ	0180h
+
+; BIOS Work area
+exptbl		equ	0fcc1h
+
+
+;	IO Port
+;
+fmpac_io	equ		07ff6h ; bit0 FM音源有効化BIT
+
+;	FMBIOS Entry
+;
+opll_pt		equ		0401ch ; OPLLのスタートアドレス
+aprl_pt		equ		04018h ; 内蔵外付け判別文字列判定アドレス
+
+;	Cartridge header
+;
+	defb	'AB'
+	defw	func_init
+	defw	0
+	defw	0
+	defw	0
+	defw	0
+	defw	0
+	defw	0
+	
+; 自己主張
+;
+	defb	'FMPAC ENABLER   v1.00 23/08/24  @v9938',00
+	ds		9,00h
+	ds		16,00h
+
+; INIT Routine
+;
+func_init:
+	call pac_enable
+	call chgcpumode
+	ret
+
+
+
+; FMPAC有効化ルーチン
+; 全スロットをチェックして外付けOPLLがある場合は有効化する
+
+pac_enable:
+
+; 基本スロットでのOPLLチェックループ
+;
+chk_msl:
+	xor	a				; 基本SLT0
+l_msl:
+	push af
+    ld	c,a
+    ld	b,0
+    ld	hl,exptbl  		; スロット拡張の有無フラグ
+    add	hl,bc			; スロットチェック
+    ld	a,(hl)			; フラグロード
+    and 080h			; 拡張チェック
+    jr nz,chk_expsl		; 拡張されているので拡張スロットで回す
+    pop af				; 基本スロット
+	push af				; スロットは使い回すので保存
+    call opll_chk		; 基本スロットでのチェック
+ret_msl:
+	pop af				; スロット情報は戻す
+    inc a				; 次のスロット
+    cp 04h				; 全スロットチェック完了か？
+    jr nz,l_msl			; まだ完了していない
+	xor a
+	ret					; チェック完了
+
+chk_expsl:
+	ld b,4				; ループ回数
+	ld a,c				; 基本スロット情報
+	or 080h				; 拡張スロットフラグセット
+
+; 拡張スロットでのOPLLチェックループ
+;	
+l_expsl:
+	push bc				; ループ回数保存
+	push af				; スロット情報保存
+	call opll_chk		; 拡張スロットチェック
+	pop af
+	pop bc
+	add a,04h				; 拡張スロット+1
+	djnz l_expsl		; 拡張スロット処理の継続するか
+	jr ret_msl			; 基本スロット処理に戻る
+
+; OPLLのチェック処理	
+; a:チェックしたいSLT
+
+; まずはOPLLの文字列を持っているかをチェックする
+;
+opll_chk:
+	ld	hl,cmpstr		; 比較文字列の先頭位置
+	ld	de,opll_pt		; BIOS ROM上のチェックアドレス
+l_opll_chk:
+	push af
+	push de
+	push hl
+	ex de,hl			; HL= Read address
+	call rdslt
+	pop hl
+	pop de
+	cp	(hl)			; テーブルの文字を比較
+	jr	nz,no_opll		; 不一致で戻る
+	inc	de				; 次の文字比較準備
+	inc	hl				
+	ld	a,(hl)			; チェック文字列が終わった？
+	and	a				; end of name?
+	jr	z,aprl_chk		; 内蔵か外付けかの判別へ
+	pop af
+	jr l_opll_chk		; チェック継続
+
+; 次にまずはAPRL文字列をチェックして内蔵OPLLかをチェックする
+;
+aprl_chk:
+	pop af				; スロット番号復帰
+	inc	hl				; 次の比較文字列に→APRL
+	ld	de,aprl_pt		; BIOS ROM上のチェックアドレス
+l_aprl_chk:
+	push af
+	push de
+	push hl
+	ex de,hl			; HL= Read address
+	call rdslt
+	pop hl
+	pop de
+	cp	(hl)			; テーブルの文字を比較
+	jr	nz,opps_fmpac	; 外付けOPLLあり
+	inc	de				; 次の文字比較準備
+	inc	hl				
+	ld	a,(hl)			; チェック文字列が終わった？
+	and	a				; end of name?
+	jr	z,no_fmpac		; 内蔵OPLLあり
+	pop af
+	jr l_aprl_chk		; チェック継続
+
+no_fmpac:
+no_opll:
+	pop af				; SP補正
+	scf					; CARRYセット
+	ret
+
+; 外付け音源だったのでOPLLを有効化する
+;
+
+opps_fmpac:
+	pop af				; スロット番号復帰
+	ld hl,fmpac_io		; FMPACのコントロールレジスタの値セット
+	push af
+	call rdslt			; 値読み込み
+	or 01h				; OPLL有効化BIT=1
+	ld e,a				; 書き込み値
+	pop af				; スロット番号復帰
+	call wrslt			; 値書き込み
+	xor a				; NO Carry
+	ret
+
+cmpstr:
+	defb	'OPLL',0
+	defb	'APRL',0
+
+; オマケソフト
+; R800モード切替: [2]キーを押しながら起動するとR800モードで起動出来る
+; 
+chgcpumode:
+	ld a,(msxver)		; ROM VERSION CHECK
+	cp 3				; MSX2+までは戻る
+	ret c
+	
+	xor a				; KEYマトリクスの0を指定
+	call snsmat			; KEYマトリクスの状態チェック
+	and 04h				; [2]KEYが押されているか？
+	ret nz				; 押されていない場合は戻る
+	
+	ld a,082h			; R800 DRAM mode
+	call chgcpu
+	ret
+	
+; 
+
+
+	end	
+
